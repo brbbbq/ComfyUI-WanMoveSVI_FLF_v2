@@ -118,10 +118,6 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
                 
                 # FLF Integration specific inputs
                 io.Image.Input("end_image", optional=True, tooltip="Optional target end image(s) to hard-lock the ending of the generation."),
-                io.Boolean.Input("use_end_samples", default=True, tooltip="If enabled, the node uses end_image to hard-lock the last temporal slots of the video."),
-
-                # Advanced
-                io.Combo.Input("padding_mode", options=["wan_gray_encode", "svi_zero_shift"], tooltip="Background generation method. wan_gray_encode is strictly required for Wan-Move math to work natively."),
             ],
             outputs=[
                 io.Conditioning.Output(display_name="positive"),
@@ -132,9 +128,9 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
 
     @classmethod
     def execute(cls, positive, negative, vae, width, height, length, batch_size, strength, 
-                motion_latent_count, svi_blend_length, padding_mode, 
+                motion_latent_count, svi_blend_length,
                 prev_samples=None, start_image=None, tracks=None, clip_vision=None,
-                end_image=None, use_end_samples=True) -> io.NodeOutput:
+                end_image=None) -> io.NodeOutput:
         
         device = comfy.model_management.intermediate_device()
         
@@ -165,22 +161,12 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
         frames_to_pad_svi = total_latents - 1 - svi_injected_count
         frames_to_pad_wan = total_latents - 1
 
-        if padding_mode == "wan_gray_encode":
-            # VAE Encode a 50% Gray video (Native Wan-Move padding)
-            gray_video = torch.ones((length, height, width, 3), device=device, dtype=anchor_latent.dtype) * 0.5
-            gray_latent = vae.encode(gray_video)
-            
-            svi_padding = gray_latent[:, :, -frames_to_pad_svi:] if frames_to_pad_svi > 0 else None
-            wan_padding = gray_latent[:, :, -frames_to_pad_wan:] if frames_to_pad_wan > 0 else None
-        else:
-            # Shift zeros (Native SVI Pro padding)
-            svi_padding = torch.zeros((B, C, frames_to_pad_svi, H_latent, W_latent), device=device, dtype=anchor_latent.dtype) if frames_to_pad_svi > 0 else None
-            wan_padding = torch.zeros((B, C, frames_to_pad_wan, H_latent, W_latent), device=device, dtype=anchor_latent.dtype) if frames_to_pad_wan > 0 else None
-            try:
-                if svi_padding is not None: svi_padding = comfy.latent_formats.Wan21().process_out(svi_padding)
-                if wan_padding is not None: wan_padding = comfy.latent_formats.Wan21().process_out(wan_padding)
-            except Exception:
-                pass
+        # VAE Encode a 50% Gray video (Native Wan-Move padding)
+        gray_video = torch.ones((length, height, width, 3), device=device, dtype=anchor_latent.dtype) * 0.5
+        gray_latent = vae.encode(gray_video)
+        
+        svi_padding = gray_latent[:, :, -frames_to_pad_svi:] if frames_to_pad_svi > 0 else None
+        wan_padding = gray_latent[:, :, -frames_to_pad_wan:] if frames_to_pad_wan > 0 else None
 
         # 4. Construct the Environments
         if svi_padding is not None and motion_latent is not None:
@@ -225,7 +211,7 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
 
         # 7. Apply FLF-style Overwrite to Target End Frames
         end_t_fix = 0
-        if use_end_samples and end_image is not None:
+        if end_image is not None:
             end_image_resized = comfy.utils.common_upscale(end_image.movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
             end_latent = vae.encode(end_image_resized[:, :, :, :3])
 
