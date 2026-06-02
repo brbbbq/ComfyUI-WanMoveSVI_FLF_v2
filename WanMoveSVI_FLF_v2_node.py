@@ -102,7 +102,7 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
                 io.Vae.Input("vae"),
                 
                 # Wan-Move specific inputs
-                io.Image.Input("start_image", tooltip="The starting image to anchor the generation."),
+                io.Image.Input("first_image", tooltip="The first image to anchor the generation."),
                 io.Tracks.Input("tracks", optional=True),
                 io.ClipVision.Input("clip_vision", optional=True),
                 io.Float.Input("strength", default=1.0, min=0.0, max=100.0, step=0.01),
@@ -113,11 +113,11 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
                 
                 # SVI Integration specific inputs
                 io.Latent.Input("prev_samples", optional=True, tooltip="Previous frames for motion continuity."),
-                io.Int.Input("motion_latent_count", default=1, min=0, max=128, step=1, tooltip="How many previous latent frames SVI injects."),
+                io.Int.Input("svi_latent_count", default=1, min=0, max=128, step=1, tooltip="How many previous latent frames SVI injects."),
                 io.Int.Input("svi_blend_length", default=2, min=0, max=16, step=1, tooltip="Latent frames taken to crossfade from SVI momentum to Wan-Move tracking."),
                 
                 # FLF Integration specific inputs
-                io.Image.Input("end_image", optional=True, tooltip="Optional target end image(s) to hard-lock the ending of the generation."),
+                io.Image.Input("last_image", optional=True, tooltip="Optional target last image(s) to hard-lock the ending of the generation."),
             ],
             outputs=[
                 io.Conditioning.Output(display_name="positive"),
@@ -128,33 +128,33 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
 
     @classmethod
     def execute(cls, positive, negative, vae, width, height, length, batch_size, strength, 
-                motion_latent_count, svi_blend_length,
-                prev_samples=None, start_image=None, tracks=None, clip_vision=None,
-                end_image=None) -> io.NodeOutput:
+                svi_latent_count, svi_blend_length, 
+                prev_samples=None, first_image=None, tracks=None, clip_vision=None,
+                last_image=None) -> io.NodeOutput:
         
         device = comfy.model_management.intermediate_device()
         
-        if start_image is None:
-            raise ValueError("WanMove SVI Integration requires 'start_image'.")
+        if first_image is None:
+            raise ValueError("WanMove SVI Integration requires 'first_image'.")
 
         clip_vision_output = None
         if clip_vision is not None:
-            clip_vision_output = clip_vision.encode_image(start_image)
+            clip_vision_output = clip_vision.encode_image(first_image)
 
         # 1. Resolve Anchor Latent (using VAE Encode logic)
-        start_image_resized = comfy.utils.common_upscale(start_image[:1].movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
-        anchor_latent = vae.encode(start_image_resized[:, :, :, :3])
+        first_image_resized = comfy.utils.common_upscale(first_image[:1].movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
+        anchor_latent = vae.encode(first_image_resized[:, :, :, :3])
 
         B, C, _, H_latent, W_latent = anchor_latent.shape
         total_latents = ((length - 1) // 4) + 1
         empty_latent = torch.zeros([batch_size, 16, total_latents, H_latent, W_latent], device=device)
 
         # 2. Resolve Motion Latent (SVI)
-        if prev_samples is not None and motion_latent_count > 0:
-            motion_latent = prev_samples["samples"][:, :, -motion_latent_count:].clone()
-            svi_injected_count = motion_latent_count
+        if prev_samples is not None and svi_latent_count > 0:
+            svi_latent = prev_samples["samples"][:, :, -svi_latent_count:].clone()
+            svi_injected_count = svi_latent_count
         else:
-            motion_latent = None
+            svi_latent = None
             svi_injected_count = 0
 
         # 3. Generate Padding
@@ -169,10 +169,10 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
         wan_padding = gray_latent[:, :, -frames_to_pad_wan:] if frames_to_pad_wan > 0 else None
 
         # 4. Construct the Environments
-        if svi_padding is not None and motion_latent is not None:
-            svi_base = torch.cat([anchor_latent, motion_latent, svi_padding], dim=2)
-        elif motion_latent is not None:
-            svi_base = torch.cat([anchor_latent, motion_latent], dim=2)[:, :, :total_latents]
+        if svi_padding is not None and svi_latent is not None:
+            svi_base = torch.cat([anchor_latent, svi_latent, svi_padding], dim=2)
+        elif svi_latent is not None:
+            svi_base = torch.cat([anchor_latent, svi_latent], dim=2)[:, :, :total_latents]
         else:
             svi_base = torch.cat([anchor_latent, wan_padding], dim=2)
 
@@ -210,37 +210,37 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
         concat_latent_image_neg = svi_base * (1.0 - blend_weights) + wan_base * blend_weights
 
         # 7. Apply FLF-style Overwrite to Target End Frames
-        end_t_fix = 0
-        if end_image is not None:
-            end_image_resized = comfy.utils.common_upscale(end_image.movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
-            end_latent = vae.encode(end_image_resized[:, :, :, :3])
+        last_t_fix = 0
+        if last_image is not None:
+            last_image_resized = comfy.utils.common_upscale(last_image.movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
+            last_latent = vae.encode(last_image_resized[:, :, :, :3])
 
             # Broadcast batch dimension if needed
-            if end_latent.shape[0] == 1 and batch_size > 1:
-                end_latent = end_latent.repeat(batch_size, 1, 1, 1, 1)
+            if last_latent.shape[0] == 1 and batch_size > 1:
+                last_latent = last_latent.repeat(batch_size, 1, 1, 1, 1)
 
             # Ensure compatible channel count and spatial dimensions
-            if (end_latent.shape[1] == C and 
-                end_latent.shape[3] == H_latent and 
-                end_latent.shape[4] == W_latent):
+            if (last_latent.shape[1] == C and 
+                last_latent.shape[3] == H_latent and 
+                last_latent.shape[4] == W_latent):
                 
-                T_end = end_latent.shape[2]
-                end_t_fix = min(T_end, total_latents)
+                T_last = last_latent.shape[2]
+                last_t_fix = min(T_last, total_latents)
 
-                if end_t_fix > 0:
+                if last_t_fix > 0:
                     # Overwrite trailing temporal slots of positive and negative structures
-                    concat_latent_image_pos[:, :, -end_t_fix:] = end_latent[:, :, -end_t_fix:]
-                    concat_latent_image_neg[:, :, -end_t_fix:] = end_latent[:, :, -end_t_fix:]
+                    concat_latent_image_pos[:, :, -last_t_fix:] = last_latent[:, :, -last_t_fix:]
+                    concat_latent_image_neg[:, :, -last_t_fix:] = last_latent[:, :, -last_t_fix:]
             else:
                 # Fallback path if spatial parameters do not match
-                end_t_fix = 0
+                last_t_fix = 0
 
         # 8. Apply Conditioning Mask
         mask = torch.ones((1, 1, total_latents, H_latent, W_latent), device=anchor_latent.device, dtype=anchor_latent.dtype)
         mask[:, :, :1] = 0.0 # Lock anchor frame (t=0)
 
-        if end_t_fix > 0:
-            mask[:, :, -end_t_fix:] = 0.0 # Lock target end frames
+        if last_t_fix > 0:
+            mask[:, :, -last_t_fix:] = 0.0 # Lock target end frames
 
         # Set values to Conditioning API
         positive = node_helpers.conditioning_set_values(positive, {"concat_latent_image": concat_latent_image_pos, "concat_mask": mask})
