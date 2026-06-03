@@ -96,28 +96,21 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
             node_id="WanMoveSVI_FLF_v2",
             category="conditioning/video_models",
             inputs=[
-                # Core Conditioning
                 io.Conditioning.Input("positive"),
                 io.Conditioning.Input("negative"),
                 io.Vae.Input("vae"),
-                
-                # Wan-Move specific inputs
-                io.Image.Input("first_image", tooltip="The first image to anchor the generation."),
-                io.Tracks.Input("tracks", optional=True),
                 io.ClipVision.Input("clip_vision", optional=True),
-                io.Float.Input("strength", default=1.0, min=0.0, max=100.0, step=0.01),
-                io.Int.Input("width", default=832, min=16, max=8192, step=16),
-                io.Int.Input("height", default=480, min=16, max=8192, step=16),
-                io.Int.Input("length", default=81, min=1, max=8192, step=4),
-                io.Int.Input("batch_size", default=1, min=1, max=4096),
-                
-                # SVI Integration specific inputs
-                io.Latent.Input("prev_samples", optional=True, tooltip="Previous frames for motion continuity."),
-                io.Int.Input("svi_latent_count", default=1, min=0, max=128, step=1, tooltip="How many previous latent frames SVI injects."),
-                io.Int.Input("svi_blend_length", default=2, min=0, max=16, step=1, tooltip="Latent frames taken to crossfade from SVI momentum to Wan-Move tracking."),
-                
-                # FLF Integration specific inputs
+                io.Image.Input("first_image", optional=True, tooltip="The first image to anchor the generation."),
                 io.Image.Input("last_image", optional=True, tooltip="Optional target last image(s) to hard-lock the ending of the generation."),
+				io.Tracks.Input("tracks", optional=True),
+                io.Latent.Input("prev_samples", optional=True, tooltip="Previous frames for motion continuity."),
+                io.Float.Input("move_strength", default=1.0, min=0.0, max=100.0, step=0.01),
+                io.Int.Input("svi_latent_count", default=1, min=0, max=128, step=1, tooltip="How many previous latent frames SVI injects."),
+                io.Int.Input("svi_blend_length", default=1, min=0, max=16, step=1, tooltip="Latent frames taken to crossfade from SVI momentum to Wan-Move tracking."),
+                io.Int.Input("width", default=512, min=16, max=8192, step=16),
+                io.Int.Input("height", default=512, min=16, max=8192, step=16),
+                io.Int.Input("length", default=41, min=1, max=8192, step=4),
+                io.Int.Input("batch_size", default=1, min=1, max=4096),
             ],
             outputs=[
                 io.Conditioning.Output(display_name="positive"),
@@ -127,10 +120,9 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, positive, negative, vae, width, height, length, batch_size, strength, 
-                svi_latent_count, svi_blend_length, 
-                prev_samples=None, first_image=None, tracks=None, clip_vision=None,
-                last_image=None) -> io.NodeOutput:
+    def execute(cls, positive, negative, vae, first_image, svi_latent_count, 
+                svi_blend_length, move_strength, width, height, length, batch_size,
+                clip_vision=None, last_image=None, prev_samples=None, tracks=None) -> io.NodeOutput:
         
         device = comfy.model_management.intermediate_device()
         
@@ -179,7 +171,7 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
         wan_base = torch.cat([anchor_latent, wan_padding], dim=2)
 
         # 5. Apply Wan-Move Tracking to the wan_base
-        if tracks is not None and strength > 0.0:
+        if tracks is not None and move_strength > 0.0:
             tracks_path = tracks["track_path"][:length]
             num_tracks = tracks_path.shape[-2]
             track_visibility = tracks.get("track_visibility", torch.ones((length, num_tracks), dtype=torch.bool, device=device))
@@ -187,7 +179,7 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
             track_pos = create_pos_embeddings(tracks_path, track_visibility, [4, 8, 8], height, width, track_num=num_tracks)
             track_pos = comfy.utils.resize_to_batch_size(track_pos.unsqueeze(0), batch_size)
 
-            wan_tracked = replace_feature(wan_base.clone(), track_pos, strength)
+            wan_tracked = replace_feature(wan_base.clone(), track_pos, move_strength)
         else:
             wan_tracked = wan_base.clone()
 
