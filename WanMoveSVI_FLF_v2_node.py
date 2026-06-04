@@ -102,7 +102,7 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
                 io.ClipVision.Input("clip_vision", optional=True),
                 io.Image.Input("first_image", optional=True, tooltip="The first image to anchor the generation."),
                 io.Image.Input("last_image", optional=True, tooltip="Optional target last image(s) to hard-lock the ending of the generation."),
-				io.Tracks.Input("tracks", optional=True),
+                io.Tracks.Input("tracks", optional=True),
                 io.Latent.Input("prev_samples", optional=True, tooltip="Previous frames for motion continuity."),
                 io.Float.Input("move_strength", default=1.0, min=0.0, max=100.0, step=0.01),
                 io.Int.Input("svi_latent_count", default=1, min=0, max=128, step=1, tooltip="How many previous latent frames SVI injects."),
@@ -137,6 +137,9 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
         first_image_resized = comfy.utils.common_upscale(first_image[:1].movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
         anchor_latent = vae.encode(first_image_resized[:, :, :, :3])
 
+        if anchor_latent.shape[0] == 1 and batch_size > 1:
+            anchor_latent = anchor_latent.repeat(batch_size, 1, 1, 1, 1)
+
         B, C, _, H_latent, W_latent = anchor_latent.shape
         total_latents = ((length - 1) // 4) + 1
         empty_latent = torch.zeros([batch_size, 16, total_latents, H_latent, W_latent], device=device)
@@ -144,6 +147,8 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
         # 2. Resolve Motion Latent (SVI)
         if prev_samples is not None and svi_latent_count > 0:
             svi_latent = prev_samples["samples"][:, :, -svi_latent_count:].clone()
+            if svi_latent.shape[0] == 1 and batch_size > 1:
+                svi_latent = svi_latent.repeat(batch_size, 1, 1, 1, 1)
             svi_injected_count = svi_latent_count
         else:
             svi_latent = None
@@ -154,8 +159,15 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
         frames_to_pad_wan = total_latents - 1
 
         # VAE Encode a 50% Gray video (Native Wan-Move padding)
+        # Add a tiny amount of noise to prevent VAE GroupNorm zero-variance explosions on flat colors (fixes bright/washed-out frames)
         gray_video = torch.ones((length, height, width, 3), device=device, dtype=anchor_latent.dtype) * 0.5
+        gray_video += torch.randn_like(gray_video) * 0.005
+        gray_video = torch.clamp(gray_video, 0.0, 1.0)
+        
         gray_latent = vae.encode(gray_video)
+        
+        if gray_latent.shape[0] == 1 and batch_size > 1:
+            gray_latent = gray_latent.repeat(batch_size, 1, 1, 1, 1)
         
         svi_padding = gray_latent[:, :, -frames_to_pad_svi:] if frames_to_pad_svi > 0 else None
         wan_padding = gray_latent[:, :, -frames_to_pad_wan:] if frames_to_pad_wan > 0 else None

@@ -15,7 +15,7 @@ class WanMoveSVI_FLF_Decode(io.ComfyNode):
                 io.Latent.Input("latent"),
                 io.Vae.Input("vae"),
                 io.Int.Input("svi_latent_count", default=1, min=0, max=128, step=1, tooltip="Pass-through of svi_latent_count."),
-                io.Int.Input("crop_amount", default=4, min=0, max=1000, step=1, tooltip="Number of image frames to crop from the end of the sequence."),
+                io.Int.Input("latent_crop_count", default=1, min=0, max=250, step=1, tooltip="Number of latent frames to crop from the end of the sequence. Each latent frame represents 4 pixel frames."),
             ],
             outputs=[
                 io.Latent.Output("latent"),
@@ -27,7 +27,7 @@ class WanMoveSVI_FLF_Decode(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, latent, vae, svi_latent_count, crop_amount) -> io.NodeOutput:
+    def execute(cls, latent, vae, svi_latent_count, latent_crop_count) -> io.NodeOutput:
         # 1. Decode the latents (using comfy-core VAE Decode logic)
         images = vae.decode(latent["samples"])
         
@@ -38,13 +38,14 @@ class WanMoveSVI_FLF_Decode(io.ComfyNode):
             images = images.reshape(B * T, H, W, C)
         
         # 2. Crop the image sequence
+        # Wan uses 4x temporal compression, meaning 1 latent frame = 4 image frames.
+        pixel_crop_amount = latent_crop_count * 4
         N = images.shape[0]
-        new_N = max(1, N - crop_amount)
+        new_N = max(1, N - pixel_crop_amount)
         cropped_images = images[:new_N]
         
         # 3. Extract the first_image
-        # If the new sequence has 37 frames (new_N=37), the last index is 36.
-        # According to logic: first_image_index = last_image_index - crop_amount
+        # If the new sequence has 33 frames (new_N=33), the last index is 32.
         target_index = max(0, new_N - (svi_latent_count * 4) - 1)
         first_image = images[target_index : target_index + 1]
         
@@ -52,18 +53,15 @@ class WanMoveSVI_FLF_Decode(io.ComfyNode):
         samples = latent["samples"]
         cropped_latent = latent.copy()
         
-        # Wan uses 4x temporal compression, meaning 4 image frames = 1 latent frame.
-        latent_crop = crop_amount // 4
-        
         if samples.dim() == 5:
             # Wan Video Latent Shape: [B, C, T, H, W]
             T_latent = samples.shape[2]
-            new_T = max(1, T_latent - latent_crop)
+            new_T = max(1, T_latent - latent_crop_count)
             cropped_latent["samples"] = samples[:, :, :new_T, :, :]
         elif samples.dim() == 4:
             # Fallback for standard 4D latents: [B (Time), C, H, W]
             T_latent = samples.shape[0]
-            new_T = max(1, T_latent - latent_crop)
+            new_T = max(1, T_latent - latent_crop_count)
             cropped_latent["samples"] = samples[:new_T, :, :, :]
             
         # 5. Calculate overlap
