@@ -1,4 +1,5 @@
 from .WanMoveSVI_FLF_v2_node import WanMoveSVI_FLF_v2
+from .WanMoveSVI_FLF_Decode import WanMoveSVI_FLF_Decode
 from comfy_api.latest import ComfyExtension, io
 from typing_extensions import override
 
@@ -8,7 +9,8 @@ class WanMoveSVI_FLFExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         # Returns both nodes to be populated in the ComfyUI Node menu
         return [
-            WanMoveSVI_FLF_v2
+            WanMoveSVI_FLF_v2,
+            WanMoveSVI_FLF_Decode
         ]
 
 async def comfy_entrypoint() -> WanMoveSVI_FLFExtension:
