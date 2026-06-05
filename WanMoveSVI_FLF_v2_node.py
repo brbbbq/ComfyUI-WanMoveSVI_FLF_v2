@@ -102,7 +102,7 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
                 io.ClipVision.Input("clip_vision", optional=True),
                 io.Image.Input("first_image", optional=True, tooltip="First image to anchor the generation."),
                 io.Image.Input("last_image", optional=True, tooltip="Optional last image."),
-                io.Image.Input("anchor_image", optional=True, display_name="anchor_image (optional)", tooltip="Optional image to use instead of the first frame for the anchor latent."),
+                io.Image.Input("anchor_image", optional=True, display_name="anchor_image (optional)", tooltip="Optional image used as the feature tracking source (anchor latent) to guide rest of generation."),
                 io.Tracks.Input("tracks", optional=True),
                 io.Latent.Input("prev_samples", optional=True, tooltip="Previous latents for SVI."),
                 io.Float.Input("move_strength", default=2.0, min=0.0, max=100.0, step=0.01),
@@ -135,12 +135,18 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
         if clip_vision is not None:
             clip_vision_output = clip_vision.encode_image(first_image)
 
-        # 1. Resolve Anchor Latent (using VAE Encode logic)
-        anchor_source = anchor_image if anchor_image is not None else first_image
-        anchor_image_resized = comfy.utils.common_upscale(anchor_source[:1].movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
-        anchor_latent = vae.encode(anchor_image_resized[:, :, :, :3])
+        # 1. Resolve First Latent (temporal t=0)
+        first_image_resized = comfy.utils.common_upscale(first_image[:1].movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
+        first_latent = vae.encode(first_image_resized[:, :, :, :3])
 
-        B, C, _, H_latent, W_latent = anchor_latent.shape
+        # Resolve Anchor Latent (feature tracking source)
+        if anchor_image is not None:
+            anchor_image_resized = comfy.utils.common_upscale(anchor_image[:1].movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
+            anchor_latent = vae.encode(anchor_image_resized[:, :, :, :3])
+        else:
+            anchor_latent = first_latent.clone()
+
+        B, C, _, H_latent, W_latent = first_latent.shape
         total_latents = ((length - 1) // 4) + 1
         empty_latent = torch.zeros([batch_size, 16, total_latents, H_latent, W_latent], device=device)
 
@@ -157,7 +163,7 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
         frames_to_pad_wan = total_latents - 1
 
         # VAE Encode a 50% Gray video (Native Wan-Move padding)
-        gray_video = torch.ones((length, height, width, 3), device=device, dtype=anchor_latent.dtype) * 0.5
+        gray_video = torch.ones((length, height, width, 3), device=device, dtype=first_latent.dtype) * 0.5
         
         if apply_padding_noise:
             # Add a tiny amount of noise to prevent VAE GroupNorm zero-variance explosions
@@ -169,17 +175,17 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
         svi_padding = gray_latent[:, :, -frames_to_pad_svi:] if frames_to_pad_svi > 0 else None
         wan_padding = gray_latent[:, :, -frames_to_pad_wan:] if frames_to_pad_wan > 0 else None
 
-        # 4. Construct the Environments
+        # 4. Construct the Environments using first_latent at index 0
         if svi_padding is not None and svi_latent is not None:
-            svi_base = torch.cat([anchor_latent, svi_latent, svi_padding], dim=2)
+            svi_base = torch.cat([first_latent, svi_latent, svi_padding], dim=2)
         elif svi_latent is not None:
-            svi_base = torch.cat([anchor_latent, svi_latent], dim=2)[:, :, :total_latents]
+            svi_base = torch.cat([first_latent, svi_latent], dim=2)[:, :, :total_latents]
         else:
-            svi_base = torch.cat([anchor_latent, wan_padding], dim=2)
+            svi_base = torch.cat([first_latent, wan_padding], dim=2)
 
-        wan_base = torch.cat([anchor_latent, wan_padding], dim=2)
+        wan_base = torch.cat([first_latent, wan_padding], dim=2)
 
-        # 5. Apply Wan-Move Tracking to the wan_base
+        # 5. Apply Wan-Move Tracking using anchor_latent as the feature source
         if tracks is not None and move_strength > 0.0:
             tracks_path = tracks["track_path"][:length]
             num_tracks = tracks_path.shape[-2]
@@ -188,7 +194,12 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
             track_pos = create_pos_embeddings(tracks_path, track_visibility, [4, 8, 8], height, width, track_num=num_tracks)
             track_pos = track_pos.unsqueeze(0)
 
-            wan_tracked = replace_feature(wan_base.clone(), track_pos, move_strength)
+            # We build the tracking base with anchor_latent at t=0 so replace_feature reads features from it
+            wan_base_for_tracking = torch.cat([anchor_latent, wan_padding], dim=2)
+            wan_tracked = replace_feature(wan_base_for_tracking, track_pos, move_strength)
+            
+            # Restore first_latent at t=0 so the temporal start remains consistent with first_image
+            wan_tracked[:, :, 0] = first_latent[:, :, 0]
         else:
             wan_tracked = wan_base.clone()
 
