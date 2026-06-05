@@ -94,7 +94,7 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="WanMoveSVI_FLF_v2",
-            category="conditioning/video_models",
+            category="WanMoveSVI_FLF_v2",
             inputs=[
                 io.Conditioning.Input("positive"),
                 io.Conditioning.Input("negative"),
@@ -104,13 +104,14 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
                 io.Image.Input("last_image", optional=True, tooltip="Optional target last image(s) to hard-lock the ending of the generation."),
                 io.Tracks.Input("tracks", optional=True),
                 io.Latent.Input("prev_samples", optional=True, tooltip="Previous frames for motion continuity."),
-                io.Float.Input("move_strength", default=1.0, min=0.0, max=100.0, step=0.01),
+                io.Float.Input("move_strength", default=2.0, min=0.0, max=100.0, step=0.01),
                 io.Int.Input("svi_latent_count", default=1, min=0, max=128, step=1, tooltip="How many previous latent frames SVI injects."),
                 io.Int.Input("svi_blend_length", default=1, min=0, max=16, step=1, tooltip="Latent frames taken to crossfade from SVI momentum to Wan-Move tracking."),
                 io.Int.Input("width", default=512, min=16, max=8192, step=16),
                 io.Int.Input("height", default=512, min=16, max=8192, step=16),
                 io.Int.Input("length", default=41, min=1, max=8192, step=4),
                 io.Int.Input("batch_size", default=1, min=1, max=4096),
+                io.Boolean.Input("apply_padding_noise", default=False, tooltip="Inject noise into gray padding to prevent VAE artifacts. Try disabling if you notice last-frame color shifts."),
             ],
             outputs=[
                 io.Conditioning.Output(display_name="positive"),
@@ -122,7 +123,7 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
     @classmethod
     def execute(cls, positive, negative, vae, first_image, svi_latent_count, 
                 svi_blend_length, move_strength, width, height, length, batch_size,
-                clip_vision=None, last_image=None, prev_samples=None, tracks=None) -> io.NodeOutput:
+                apply_padding_noise, clip_vision=None, last_image=None, prev_samples=None, tracks=None) -> io.NodeOutput:
         
         device = comfy.model_management.intermediate_device()
         
@@ -159,10 +160,12 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
         frames_to_pad_wan = total_latents - 1
 
         # VAE Encode a 50% Gray video (Native Wan-Move padding)
-        # Add a tiny amount of noise to prevent VAE GroupNorm zero-variance explosions on flat colors (fixes bright/washed-out frames)
         gray_video = torch.ones((length, height, width, 3), device=device, dtype=anchor_latent.dtype) * 0.5
-        gray_video += torch.randn_like(gray_video) * 0.005
-        gray_video = torch.clamp(gray_video, 0.0, 1.0)
+        
+        if apply_padding_noise:
+            # Add a tiny amount of noise to prevent VAE GroupNorm zero-variance explosions
+            gray_video += torch.randn_like(gray_video) * 0.005
+            gray_video = torch.clamp(gray_video, 0.0, 1.0)
         
         gray_latent = vae.encode(gray_video)
         

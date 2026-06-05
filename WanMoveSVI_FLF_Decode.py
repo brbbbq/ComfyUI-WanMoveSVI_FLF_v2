@@ -10,7 +10,7 @@ class WanMoveSVI_FLF_Decode(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="WanMoveSVI_FLF_Decode",
-            category="conditioning/video_models",
+            category="WanMoveSVI_FLF_v2",
             inputs=[
                 io.Latent.Input("latent"),
                 io.Vae.Input("vae"),
@@ -18,11 +18,11 @@ class WanMoveSVI_FLF_Decode(io.ComfyNode):
                 io.Int.Input("latent_crop_count", default=1, min=0, max=250, step=1, tooltip="Number of latent frames to crop from the end of the sequence. Each latent frame represents 4 pixel frames."),
             ],
             outputs=[
-                io.Latent.Output("latent"),
-                io.Image.Output("image"),
+                io.Latent.Output("LATENT"),
+                io.Image.Output("IMAGE"),
                 io.Image.Output("first_image"),
                 io.Int.Output("svi_latent_count"),
-                io.Int.Output("overlap"),
+                io.Int.Output("stitch_overlap"),
             ],
         )
 
@@ -64,7 +64,7 @@ class WanMoveSVI_FLF_Decode(io.ComfyNode):
             new_T = max(1, T_latent - latent_crop_count)
             cropped_latent["samples"] = samples[:new_T, :, :, :]
             
-        # 5. Calculate overlap
-        overlap = svi_latent_count * 4
+        # 5. Calculate stitch_overlap
+        stitch_overlap = svi_latent_count * 4 + 1
         
-        return io.NodeOutput(cropped_latent, cropped_images, first_image, svi_latent_count, overlap)
+        return io.NodeOutput(cropped_latent, cropped_images, first_image, svi_latent_count, stitch_overlap)
