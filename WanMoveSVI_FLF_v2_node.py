@@ -100,18 +100,18 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
                 io.Conditioning.Input("negative"),
                 io.Vae.Input("vae"),
                 io.ClipVision.Input("clip_vision", optional=True),
-                io.Image.Input("first_image", optional=True, tooltip="The first image to anchor the generation."),
-                io.Image.Input("last_image", optional=True, tooltip="Optional target last image(s) to hard-lock the ending of the generation."),
+                io.Image.Input("first_image", optional=True, tooltip="First image to anchor the generation."),
+                io.Image.Input("last_image", optional=True, tooltip="Optional last image."),
+                io.Image.Input("anchor_image", optional=True, display_name="anchor_image (optional)", tooltip="Optional image to use instead of the first frame for the anchor latent."),
                 io.Tracks.Input("tracks", optional=True),
-                io.Latent.Input("prev_samples", optional=True, tooltip="Previous frames for motion continuity."),
+                io.Latent.Input("prev_samples", optional=True, tooltip="Previous latents for SVI."),
                 io.Float.Input("move_strength", default=2.0, min=0.0, max=100.0, step=0.01),
-                io.Int.Input("svi_latent_count", default=1, min=0, max=128, step=1, tooltip="How many previous latent frames SVI injects."),
-                io.Int.Input("svi_blend_length", default=1, min=0, max=16, step=1, tooltip="Latent frames taken to crossfade from SVI momentum to Wan-Move tracking."),
+                io.Int.Input("svi_latent_count", default=1, min=0, max=128, step=1, tooltip="How many previous latents for SVI to inject."),
+                io.Int.Input("svi_blend_length", default=1, min=0, max=16, step=1, tooltip="How many latents to crossfade from SVI to Wan-Move."),
                 io.Int.Input("width", default=512, min=16, max=8192, step=16),
                 io.Int.Input("height", default=512, min=16, max=8192, step=16),
                 io.Int.Input("length", default=41, min=1, max=8192, step=4),
-                io.Int.Input("batch_size", default=1, min=1, max=4096),
-                io.Boolean.Input("apply_padding_noise", default=False, tooltip="Inject noise into gray padding to prevent VAE artifacts. Try disabling if you notice last-frame color shifts."),
+                io.Boolean.Input("apply_padding_noise", default=False, tooltip="Fix for svi_latent_count of 2."),
             ],
             outputs=[
                 io.Conditioning.Output(display_name="positive"),
@@ -122,11 +122,12 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
 
     @classmethod
     def execute(cls, positive, negative, vae, first_image, svi_latent_count, 
-                svi_blend_length, move_strength, width, height, length, batch_size,
-                apply_padding_noise, clip_vision=None, last_image=None, prev_samples=None, tracks=None) -> io.NodeOutput:
+                svi_blend_length, move_strength, width, height, length,
+                apply_padding_noise, clip_vision=None, last_image=None, prev_samples=None, tracks=None, anchor_image=None) -> io.NodeOutput:
         
         device = comfy.model_management.intermediate_device()
-        
+        batch_size = 1
+
         if first_image is None:
             raise ValueError("WanMove SVI Integration requires 'first_image'.")
 
@@ -135,11 +136,9 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
             clip_vision_output = clip_vision.encode_image(first_image)
 
         # 1. Resolve Anchor Latent (using VAE Encode logic)
-        first_image_resized = comfy.utils.common_upscale(first_image[:1].movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
-        anchor_latent = vae.encode(first_image_resized[:, :, :, :3])
-
-        if anchor_latent.shape[0] == 1 and batch_size > 1:
-            anchor_latent = anchor_latent.repeat(batch_size, 1, 1, 1, 1)
+        anchor_source = anchor_image if anchor_image is not None else first_image
+        anchor_image_resized = comfy.utils.common_upscale(anchor_source[:1].movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
+        anchor_latent = vae.encode(anchor_image_resized[:, :, :, :3])
 
         B, C, _, H_latent, W_latent = anchor_latent.shape
         total_latents = ((length - 1) // 4) + 1
@@ -148,8 +147,6 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
         # 2. Resolve Motion Latent (SVI)
         if prev_samples is not None and svi_latent_count > 0:
             svi_latent = prev_samples["samples"][:, :, -svi_latent_count:].clone()
-            if svi_latent.shape[0] == 1 and batch_size > 1:
-                svi_latent = svi_latent.repeat(batch_size, 1, 1, 1, 1)
             svi_injected_count = svi_latent_count
         else:
             svi_latent = None
@@ -168,9 +165,6 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
             gray_video = torch.clamp(gray_video, 0.0, 1.0)
         
         gray_latent = vae.encode(gray_video)
-        
-        if gray_latent.shape[0] == 1 and batch_size > 1:
-            gray_latent = gray_latent.repeat(batch_size, 1, 1, 1, 1)
         
         svi_padding = gray_latent[:, :, -frames_to_pad_svi:] if frames_to_pad_svi > 0 else None
         wan_padding = gray_latent[:, :, -frames_to_pad_wan:] if frames_to_pad_wan > 0 else None
@@ -192,7 +186,7 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
             track_visibility = tracks.get("track_visibility", torch.ones((length, num_tracks), dtype=torch.bool, device=device))
 
             track_pos = create_pos_embeddings(tracks_path, track_visibility, [4, 8, 8], height, width, track_num=num_tracks)
-            track_pos = comfy.utils.resize_to_batch_size(track_pos.unsqueeze(0), batch_size)
+            track_pos = track_pos.unsqueeze(0)
 
             wan_tracked = replace_feature(wan_base.clone(), track_pos, move_strength)
         else:
@@ -221,10 +215,6 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
         if last_image is not None:
             last_image_resized = comfy.utils.common_upscale(last_image.movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
             last_latent = vae.encode(last_image_resized[:, :, :, :3])
-
-            # Broadcast batch dimension if needed
-            if last_latent.shape[0] == 1 and batch_size > 1:
-                last_latent = last_latent.repeat(batch_size, 1, 1, 1, 1)
 
             # Ensure compatible channel count and spatial dimensions
             if (last_latent.shape[1] == C and 
