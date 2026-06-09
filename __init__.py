@@ -1,6 +1,5 @@
 from .WanMoveSVI_FLF_v2_node import WanMoveSVI_FLF_v2
-from .WanMoveSVI_FLF_Encode import WanMoveSVI_FLF_Encode
-from .WanMoveSVI_FLF_Decode import WanMoveSVI_FLF_Decode
+from .WanMoveSVI_FLF_EncodeDecode import WanMoveSVI_FLF_Encode, WanMoveSVI_FLF_Decode
 from .WanMoveSVI_FLF_Stitch import WanMoveSVI_FLF_Stitch
 from .WanMoveSVI_FLF_Visualize import WanMoveSVI_FLF_Visualize
 from comfy_api.latest import ComfyExtension, io
