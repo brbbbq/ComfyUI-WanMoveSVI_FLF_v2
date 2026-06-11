@@ -174,7 +174,7 @@ class WanMoveSVI_FLF_Decode(io.ComfyNode):
                 io.Vae.Input("vae"),
                 io.Int.Input("crop_amount", default=0, min=0, tooltip="Number of pixel frames to crop from the end of the sequence."),
                 io.Int.Input("svi_latent_count", default=1, min=0, max=128, step=1, tooltip="Pass-through of svi_latent_count."),
-                io.Image.Input("image_ref", tooltip="Optional reference image for color matching MKL."),
+                io.Image.Input("image_ref", optional=True, tooltip="Optional reference image for color matching MKL."),
                 io.Float.Input("colormatch_strength", default=0.66, min=0.0, max=1.0, step=0.01, tooltip="Strength of the MKL Color Match."),
                 io.Float.Input("colormatch_blend", default=1.00, min=0.0, max=1.0, step=0.01, tooltip="Length of the alpha blend ramp applied backwards from the end of the sequence."),
             ],
