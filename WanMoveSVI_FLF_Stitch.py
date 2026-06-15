@@ -11,8 +11,8 @@ class WanMoveSVI_FLF_Stitch(io.ComfyNode):
             node_id="WanMoveSVI_FLF_Stitch",
             category="WanMoveSVI_FLF_v2",
             inputs=[
-                io.Image.Input("prev_images", tooltip="The first batch of images (chronologically prior)"),
-                io.Image.Input("new_images", tooltip="The second batch of images (chronologically next)"),
+                io.Image.Input("prev_images", optional=True, tooltip="The first batch of images (chronologically prior)"),
+                io.Image.Input("new_images", optional=True, tooltip="The second batch of images (chronologically next)"),
                 io.Int.Input(
                     "stitch_overlap", 
                     default=5, 
@@ -35,37 +35,47 @@ class WanMoveSVI_FLF_Stitch(io.ComfyNode):
 
     @classmethod
     @override
-    def execute(cls, prev_images, new_images, stitch_overlap, preview_range) -> io.NodeOutput:
-        # Validate that the resolution of both image batches matches
-        if prev_images.shape[1:3] != new_images.shape[1:3]:
-            raise ValueError(
-                f"Previous and new images must have the same spatial dimensions: "
-                f"{prev_images.shape[1:3]} vs {new_images.shape[1:3]}"
-            )
+    def execute(cls, prev_images=None, new_images=None, stitch_overlap=5, preview_range="0:-1") -> io.NodeOutput:
+        # Validate that at least one of the inputs exists
+        if prev_images is None and new_images is None:
+            raise ValueError("At least one image input (prev_images or new_images) must be provided.")
 
-        # Restrict the overlap to not exceed the length of the smaller batch
-        max_overlap = min(len(prev_images), len(new_images))
-        overlap = min(stitch_overlap, max_overlap)
-
-        if overlap <= 0:
-            # If overlap is 0, perform a standard sequential concatenation
-            IMAGE = torch.cat((prev_images, new_images), dim=0)
+        # Pass through directly if only one image batch is supplied
+        if prev_images is not None and new_images is None:
+            IMAGE = prev_images
+        elif new_images is not None and prev_images is None:
+            IMAGE = new_images
         else:
-            # Split batches into non-overlapping sections and overlap sections
-            prefix = prev_images[:-overlap] if overlap < len(prev_images) else prev_images[:0]
-            suffix = new_images[overlap:] if overlap < len(new_images) else new_images[:0]
+            # Validate that the resolution of both image batches matches when both are present
+            if prev_images.shape[1:3] != new_images.shape[1:3]:
+                raise ValueError(
+                    f"Previous and new images must have the same spatial dimensions: "
+                    f"{prev_images.shape[1:3]} vs {new_images.shape[1:3]}"
+                )
 
-            blend_src = prev_images[-overlap:]
-            blend_dst = new_images[:overlap]
+            # Restrict the overlap to not exceed the length of the smaller batch
+            max_overlap = min(len(prev_images), len(new_images))
+            overlap = min(stitch_overlap, max_overlap)
 
-            # Linear blend calculation over the overlapping frame dimension
-            alpha = torch.linspace(0, 1, overlap + 2, device=blend_src.device, dtype=blend_src.dtype)[1:-1]
-            alpha = alpha.view(-1, 1, 1, 1)  # Reshape for broadcasting over [Frames, Height, Width, Channels]
+            if overlap <= 0:
+                # If overlap is 0, perform a standard sequential concatenation
+                IMAGE = torch.cat((prev_images, new_images), dim=0)
+            else:
+                # Split batches into non-overlapping sections and overlap sections
+                prefix = prev_images[:-overlap] if overlap < len(prev_images) else prev_images[:0]
+                suffix = new_images[overlap:] if overlap < len(new_images) else new_images[:0]
 
-            blended_images = (1 - alpha) * blend_src + alpha * blend_dst
-            
-            # Concatenate the preceding frames, the blended frames, and the remaining trailing frames
-            IMAGE = torch.cat((prefix, blended_images, suffix), dim=0)
+                blend_src = prev_images[-overlap:]
+                blend_dst = new_images[:overlap]
+
+                # Linear blend calculation over the overlapping frame dimension
+                alpha = torch.linspace(0, 1, overlap + 2, device=blend_src.device, dtype=blend_src.dtype)[1:-1]
+                alpha = alpha.view(-1, 1, 1, 1)  # Reshape for broadcasting over [Frames, Height, Width, Channels]
+
+                blended_images = (1 - alpha) * blend_src + alpha * blend_dst
+                
+                # Concatenate the preceding frames, the blended frames, and the remaining trailing frames
+                IMAGE = torch.cat((prefix, blended_images, suffix), dim=0)
 
         # Generate the preview slice based on the preview_range string
         preview = IMAGE
