@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import comfy.model_management
 import comfy.utils
 import comfy.latent_formats
@@ -105,6 +106,7 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
                 io.Image.Input("anchor_image", optional=True, display_name="anchor_image (optional)", tooltip="Optional image used as the feature tracking source (anchor latent) to guide rest of generation."),
                 io.Tracks.Input("tracks", optional=True),
                 io.Latent.Input("prev_samples", optional=True, tooltip="Previous latents for SVI."),
+                io.Mask.Input("custom_mask", optional=True, tooltip="Override the generated mask with a custom sequence."),
                 io.Float.Input("move_strength", default=2.0, min=0.0, max=100.0, step=0.01),
                 io.Int.Input("svi_latent_count", default=1, min=0, max=128, step=1, tooltip="How many previous latents for SVI to inject."),
                 io.Int.Input("svi_blend_length", default=1, min=0, max=16, step=1, tooltip="How many latents to crossfade from SVI to Wan-Move."),
@@ -112,18 +114,21 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
                 io.Int.Input("height", default=512, min=16, max=8192, step=16),
                 io.Int.Input("length", default=41, min=1, max=8192, step=4),
                 io.Boolean.Input("apply_padding_noise", default=False, tooltip="Fix for svi_latent_count of 2."),
+                io.Boolean.Input("fade_mask", default=False, tooltip="Smoothly fade the end mask over time instead of a hard cut."),
             ],
             outputs=[
                 io.Conditioning.Output(display_name="positive"),
                 io.Conditioning.Output(display_name="negative"),
                 io.Latent.Output(display_name="latent"),
+                io.Mask.Output(display_name="mask"),
             ],
         )
 
     @classmethod
     def execute(cls, positive, negative, vae, first_image, svi_latent_count, 
                 svi_blend_length, move_strength, width, height, length,
-                apply_padding_noise, clip_vision=None, last_image=None, prev_samples=None, tracks=None, anchor_image=None) -> io.NodeOutput:
+                apply_padding_noise, fade_mask, clip_vision=None, last_image=None, 
+                prev_samples=None, tracks=None, anchor_image=None, custom_mask=None) -> io.NodeOutput:
         
         device = comfy.model_management.intermediate_device()
         batch_size = 1
@@ -247,8 +252,31 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
         mask = torch.ones((1, 1, total_latents, H_latent, W_latent), device=anchor_latent.device, dtype=anchor_latent.dtype)
         mask[:, :, :1] = 0.0 # Lock anchor frame (t=0)
 
+        # Default FLF behavior (Hard cut vs Fade)
         if last_t_fix > 0:
-            mask[:, :, -last_t_fix:] = 0.0 # Lock target end frames
+            if fade_mask and last_t_fix > 1:
+                # Create a descending linear gradient ending at 0.0
+                for i in range(last_t_fix):
+                    alpha = 1.0 - ((i + 1) / last_t_fix)
+                    mask[:, :, -last_t_fix + i] = alpha
+            else:
+                # Hard lock
+                mask[:, :, -last_t_fix:] = 0.0 
+
+        # 9. Override with Custom Mask if provided
+        if custom_mask is not None:
+            c_mask = custom_mask.clone()
+            # Ensure it is properly dimensioned (T, H, W) -> (1, 1, T, H, W)
+            if c_mask.dim() == 2:
+                c_mask = c_mask.unsqueeze(0)
+            c_mask = c_mask.unsqueeze(0).unsqueeze(0)
+            
+            # Interpolate to strictly fit the latent space and time dimensions
+            mask = F.interpolate(c_mask, size=(total_latents, H_latent, W_latent), mode='trilinear', align_corners=False)
+            mask = mask.to(device=anchor_latent.device, dtype=anchor_latent.dtype)
+
+        # Strip dimensions to standard (T, H, W) so ComfyUI preview nodes can render it natively
+        out_mask = mask.squeeze(0).squeeze(0)
 
         # Set values to Conditioning API
         positive = node_helpers.conditioning_set_values(positive, {"concat_latent_image": concat_latent_image_pos, "concat_mask": mask})
@@ -260,4 +288,4 @@ class WanMoveSVI_FLF_v2(io.ComfyNode):
 
         out_latent = {"samples": empty_latent}
 
-        return io.NodeOutput(positive, negative, out_latent)
+        return io.NodeOutput(positive, negative, out_latent, out_mask)
