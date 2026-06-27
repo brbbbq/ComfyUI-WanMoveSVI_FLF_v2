@@ -18,31 +18,29 @@ class WanMoveSVI_FLF_Mask(io.ComfyNode):
             category="WanMoveSVI_FLF_v2",
             inputs=[
                 io.Int.Input("svi_latent_count", default=1, min=0, max=128, step=1),
+                io.String.Input("svi_mask_list", default="", tooltip="Comma-separated floats, e.g. '0.00, 0.10, 0.30'"),
                 io.Int.Input("last_latent_count", default=1, min=0, max=128, step=1),
+                io.String.Input("last_mask_list", default="", tooltip="Comma-separated floats, e.g. '0.30, 0.10, 0.00'"),
                 io.Image.Input("last_image", optional=True, tooltip="Optional batch of images representing the sequence end."),
                 io.String.Input("select_images", default="", tooltip="0-based index range to slice last_image, e.g. '5:9' or '-3:-1'"),
                 io.Boolean.Input("lock_last_image", default=False, tooltip="If true, pad to the lowest possible VAE latent multiple."),
                 io.Int.Input("width", default=512, min=16, max=8192, step=16),
                 io.Int.Input("height", default=768, min=16, max=8192, step=16),
                 io.Int.Input("length", default=41, min=1, max=8192, step=4, tooltip="Total length of the video generation."),
-                io.Int.Input("crop_adj", default=0, min=-1024, max=1024, step=1, tooltip="Increase or decrease crop amount"),
-                io.String.Input("svi_mask_list", default="", tooltip="Comma-separated floats, e.g. '0.00, 0.10, 0.30'"),
-                io.String.Input("last_mask_list", default="", tooltip="Comma-separated floats, e.g. '0.30, 0.10, 0.00'"),
             ],
             outputs=[
                 io.Image.Output("last_image_out"),
                 io.Mask.Output("mask"),
                 io.Int.Output("svi_latent_count"),
-                io.Int.Output("crop_amount"),
                 io.String.Output("info"),
             ]
         )
 
     @classmethod
     @override
-    def execute(cls, svi_latent_count: int, last_latent_count: int, width: int, height: int, length: int, 
-                crop_adj: int, lock_last_image: bool, select_images: str, svi_mask_list: str, 
-                last_mask_list: str, last_image: torch.Tensor = None) -> io.NodeOutput:
+    def execute(cls, svi_latent_count: int, svi_mask_list: str, last_latent_count: int, last_mask_list: str,
+                width: int, height: int, length: int, lock_last_image: bool, select_images: str, 
+                last_image: torch.Tensor = None) -> io.NodeOutput:
         
         # Helper to parse strings to floats safely
         def parse_float_list(s: str) -> list[float]:
@@ -59,7 +57,6 @@ class WanMoveSVI_FLF_Mask(io.ComfyNode):
         last_image_out = None
         last_image_count = 0
         repeat_count = 0
-        crop_amount = 0
 
         if last_image is not None:
             select_last_image = last_image
@@ -93,9 +90,12 @@ class WanMoveSVI_FLF_Mask(io.ComfyNode):
 
             # Sequence Padding / Trimming
             if not lock_last_image:
-                req_images = last_latent_count * 4 + 1
-                if select_image_count > req_images:
-                    last_image_out = select_last_image[-req_images:]
+                req_images = ((last_latent_count - 1) * 4 + 1) if last_latent_count > 0 else 0
+                
+                if req_images == 0:
+                    last_image_out = None
+                elif select_image_count > req_images:
+                    last_image_out = select_last_image[:req_images] # Sliced from the beginning
                 elif select_image_count < req_images:
                     repeat_count = req_images - select_image_count
                     last_frame_copy = select_last_image[-1:].repeat(repeat_count, 1, 1, 1)
@@ -104,21 +104,21 @@ class WanMoveSVI_FLF_Mask(io.ComfyNode):
                     last_image_out = select_last_image
             else:
                 # lock_last_image = True: Calculate nearest upper multiple of 4 plus 1
-                req_images = math.ceil((select_image_count - 1) / 4) * 4 + 1
-                req_images = max(1, req_images)
-                
-                if select_image_count < req_images:
-                    repeat_count = req_images - select_image_count
-                    last_frame_copy = select_last_image[-1:].repeat(repeat_count, 1, 1, 1)
-                    last_image_out = torch.cat([select_last_image, last_frame_copy], dim=0)
+                if select_image_count > 0:
+                    req_images = math.ceil((select_image_count - 1) / 4) * 4 + 1
+                    req_images = max(1, req_images)
+                    
+                    if select_image_count < req_images:
+                        repeat_count = req_images - select_image_count
+                        last_frame_copy = select_last_image[-1:].repeat(repeat_count, 1, 1, 1)
+                        last_image_out = torch.cat([select_last_image, last_frame_copy], dim=0)
+                    else:
+                        last_image_out = select_last_image
                 else:
-                    last_image_out = select_last_image
+                    last_image_out = None
             
-            crop_amount = repeat_count
-            last_image_count = len(last_image_out)
-
-        # Apply crop adjustment
-        crop_amount = crop_amount - crop_adj
+            if last_image_out is not None:
+                last_image_count = len(last_image_out)
 
 
         # ==========================================================
@@ -182,6 +182,7 @@ class WanMoveSVI_FLF_Mask(io.ComfyNode):
         # ==========================================================
         info_str = (
             f"Last Image Out Count: {last_image_count}\n"
+            f"Repeat Count:         {repeat_count}\n"
             f"Total Mask Count:     {total_masks}\n"
             f"SVI Mask Count:       {svi_mask_count}\n"
             f"SVI Mask Values:      {svi_mask_values}\n"
@@ -189,4 +190,4 @@ class WanMoveSVI_FLF_Mask(io.ComfyNode):
             f"Last Mask Values:     {last_mask_values}"
         )
 
-        return io.NodeOutput(last_image_out, mask_tensor, svi_latent_count, crop_amount, info_str)
+        return io.NodeOutput(last_image_out, mask_tensor, svi_latent_count, info_str)
