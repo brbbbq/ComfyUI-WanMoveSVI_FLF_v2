@@ -17,13 +17,13 @@ class WanMoveSVI_FLF_Mask(io.ComfyNode):
             node_id="WanMoveSVI_FLF_Mask",
             category="WanMoveSVI_FLF_v2",
             inputs=[
-                io.Int.Input("svi_latent_count", default=1, min=0, max=128, step=1),
-                io.String.Input("svi_mask_list", default="", tooltip="Comma-separated floats, e.g. '0.00, 0.10, 0.30'"),
-                io.Int.Input("last_latent_count", default=1, min=0, max=128, step=1),
-                io.String.Input("last_mask_list", default="", tooltip="Comma-separated floats, e.g. '0.30, 0.10, 0.00'"),
                 io.Image.Input("last_image", optional=True, tooltip="Optional batch of images representing the sequence end."),
-                io.String.Input("select_images", default="", tooltip="0-based index range to slice last_image, e.g. '5:9' or '-3:-1'"),
-                io.Boolean.Input("lock_last_image", default=False, tooltip="If true, pad to the lowest possible VAE latent multiple."),
+                io.String.Input("select_last_range", default="", tooltip="0-based index range to slice last_image, e.g. '5:9' or '-3:-1'"),
+                io.Boolean.Input("lock_to_range", default=False, tooltip="If true, pad to the lowest possible VAE latent multiple."),
+                io.Int.Input("svi_latent_count", default=1, min=0, max=128, step=1),
+                io.Int.Input("last_latent_count", default=1, min=0, max=128, step=1),
+                io.String.Input("svi_mask_list", default="", tooltip="Comma-separated floats, e.g. '0.00, 0.10, 0.30'"),
+                io.String.Input("last_mask_list", default="", tooltip="Comma-separated floats, e.g. '0.30, 0.10, 0.00'"),
                 io.Int.Input("width", default=512, min=16, max=8192, step=16),
                 io.Int.Input("height", default=768, min=16, max=8192, step=16),
                 io.Int.Input("length", default=41, min=1, max=8192, step=4, tooltip="Total length of the video generation."),
@@ -38,9 +38,17 @@ class WanMoveSVI_FLF_Mask(io.ComfyNode):
 
     @classmethod
     @override
-    def execute(cls, svi_latent_count: int, svi_mask_list: str, last_latent_count: int, last_mask_list: str,
-                width: int, height: int, length: int, lock_last_image: bool, select_images: str, 
-                last_image: torch.Tensor = None) -> io.NodeOutput:
+    def execute(
+		cls, 
+		last_image: torch.Tensor = None, 
+		select_last_range: str = "", 
+		lock_to_range: bool = False, 
+		svi_latent_count: int = 1, 
+		last_latent_count: int = 1, 
+		svi_mask_list: str = "", 
+		last_mask_list: str = "", 
+		width: int = 512, height: int = 768, length: int = 41
+	) -> io.NodeOutput:
         
         # Helper to parse strings to floats safely
         def parse_float_list(s: str) -> list[float]:
@@ -62,8 +70,8 @@ class WanMoveSVI_FLF_Mask(io.ComfyNode):
             select_last_image = last_image
             
             # Selection Schedule (0-Based Start:End)
-            if select_images and ":" in select_images:
-                parts = select_images.split(":")
+            if select_last_range and ":" in select_last_range:
+                parts = select_last_range.split(":")
                 total_frames = len(last_image)
                 if len(parts) == 2:
                     try:
@@ -89,7 +97,7 @@ class WanMoveSVI_FLF_Mask(io.ComfyNode):
             select_image_count = len(select_last_image)
 
             # Sequence Padding / Trimming
-            if not lock_last_image:
+            if not lock_to_range:
                 req_images = ((last_latent_count - 1) * 4 + 1) if last_latent_count > 0 else 0
                 
                 if req_images == 0:
@@ -103,7 +111,7 @@ class WanMoveSVI_FLF_Mask(io.ComfyNode):
                 else:
                     last_image_out = select_last_image
             else:
-                # lock_last_image = True: Calculate nearest upper multiple of 4 plus 1
+                # lock_to_range = True: Calculate nearest upper multiple of 4 plus 1
                 if select_image_count > 0:
                     req_images = math.ceil((select_image_count - 1) / 4) * 4 + 1
                     req_images = max(1, req_images)
@@ -124,7 +132,12 @@ class WanMoveSVI_FLF_Mask(io.ComfyNode):
         # ==========================================================
         # 2. ASSEMBLE MASK BATCH SEQUENCE
         # ==========================================================
-        total_masks = (length - 1) // 4 + 1
+        
+        # Determine total_masks using the new formula
+        if length <= 1:
+            total_masks = 1
+        else:
+            total_masks = (length - 2) // 4 + 2
         
         # --- SVI Masks ---
         svi_mask_count = svi_latent_count
@@ -161,7 +174,7 @@ class WanMoveSVI_FLF_Mask(io.ComfyNode):
         
         if mid_mask_count < 0:
             raise ValueError(
-                f"SVI frame count ({svi_mask_count}) + Last mask count ({last_mask_count}) "
+                f"SVI latent count ({svi_mask_count}) + Last latent count ({last_mask_count}) "
                 f"is greater than the total number of latents ({total_masks}). "
                 "Either increase the length of the project or decrease the SVI and Last latent counts."
             )
