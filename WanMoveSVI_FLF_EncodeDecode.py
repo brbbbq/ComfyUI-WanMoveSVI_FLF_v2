@@ -88,15 +88,25 @@ def process_svi_sequence(
             cropped_images = (1 - alpha_full) * cropped_images + alpha_full * cropped_images_cm
 
     # 3) Calculate stitch_overlap (which is also the required num_svi_frames)
-    stitch_overlap = svi_latent_count * 4 + 1
+    if svi_latent_count <= 0:
+        stitch_overlap = 0
+    else:
+        stitch_overlap = (svi_latent_count - 1) * 4 + 1
     
     # 4) SVI Samples
     svi_start_idx = max(0, num_cropped_frames - stitch_overlap)
     svi_images = cropped_images[svi_start_idx:]
     
     # Encode with VAE (Extract RGB channels)
-    svi_images_rgb = svi_images[:, :, :, :3]
-    latent_tensor = vae.encode(svi_images_rgb)
+    if stitch_overlap > 0:
+        svi_images_rgb = svi_images[:, :, :, :3]
+        latent_tensor = vae.encode(svi_images_rgb)
+    else:
+        # Handle 0 overlap safely by slicing a dummy encoded frame (avoids VAE crashing on empty tensors)
+        dummy_rgb = cropped_images[0:1, :, :, :3]
+        dummy_latent = vae.encode(dummy_rgb)
+        latent_tensor = dummy_latent[0:0] # Maintain exact dimensional shape, set batch to 0
+        
     LATENT = {"samples": latent_tensor}
     
     # 5) Select First Image
@@ -104,8 +114,10 @@ def process_svi_sequence(
     first_image_index = max(0, min(first_image_idx, num_cropped_frames - 1))
     first_image = cropped_images[first_image_index : first_image_index + 1]
     
-    # Get latent count
-    if latent_tensor.ndim == 5:
+    # Get latent count dynamically to correctly reflect shape
+    if latent_tensor.shape[0] == 0:
+        latent_count = 0
+    elif latent_tensor.ndim == 5:
         latent_count = latent_tensor.shape[2]
     else:
         latent_count = latent_tensor.shape[0]
@@ -131,8 +143,7 @@ class WanMoveSVI_FLF_Encode(io.ComfyNode):
             inputs=[
                 io.Image.Input("image"),
                 io.Vae.Input("vae"),
-                io.Int.Input("crop_amount", default=0, min=0),
-                io.Int.Input("svi_latent_count", default=1, min=1),
+                io.Int.Input("svi_latent_count", default=1, min=0),
             ],
             outputs=[
                 io.Latent.Output("LATENT"),
@@ -149,12 +160,11 @@ class WanMoveSVI_FLF_Encode(io.ComfyNode):
         cls,
         image: torch.Tensor,
         vae,
-        crop_amount: int,
         svi_latent_count: int,
     ) -> io.NodeOutput:
         
-        # Bypass color matching entirely
-        res = process_svi_sequence(image, vae, crop_amount, svi_latent_count)
+        # Bypass color matching and cropping entirely for encoding
+        res = process_svi_sequence(image, vae, 0, svi_latent_count)
         return io.NodeOutput(*res)
 
 
